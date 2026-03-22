@@ -18,6 +18,7 @@ pgcache-garage/
 ├── llm.txt                     # Full PgCache documentation for LLM context
 ├── pgcache.skill.md            # PgCache skill definition for AI agents
 ├── pgcache-playground/         # Web-based SQL editor and benchmarking tool
+├── terraform-ami/              # Direct Terraform resources (monolithic)
 ├── terraform-modules-pgcache/  # Reusable Terraform modules for AWS
 └── experiments/                # (future) Experimental configurations and tests
 ```
@@ -93,6 +94,26 @@ module "pgcache" {
 **Location**: [terraform-modules-pgcache/](terraform-modules-pgcache/)
 
 **Use case**: Infrastructure as Code for deploying PgCache on AWS.
+
+### terraform-ami
+
+Monolithic Terraform configuration for provisioning PgCache on AWS using direct AWS provider resources. No modules - all resources defined directly.
+
+Resources created:
+- IAM role with SSM read permissions
+- Security group (ports 5432, 9090, 22)
+- SSM SecureString for upstream URL
+- EC2 instance with bootstrap
+
+```bash
+terraform init
+terraform plan -var-file="prod.tfvars"
+terraform apply -var-file="prod.tfvars"
+```
+
+**Location**: [terraform-ami/](terraform-ami/)
+
+**Use case**: Quick, self-contained Terraform setup without external module dependencies.
 
 ## Quick Start
 
