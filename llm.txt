@@ -1,0 +1,796 @@
+# PgCache Documentation
+
+PgCache is a transparent caching proxy for PostgreSQL that sits between your application and database. It automatically caches SELECT query results and uses Change Data Capture (CDC) via logical replication to keep the cache synchronized with the origin.
+
+GitHub: https://github.com/tempest98/pgcache
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- PostgreSQL 16+ as origin database
+- Logical replication enabled on origin (`wal_level = logical`)
+- Docker for running PgCache
+
+### Configure Origin Database
+
+Enable logical replication in `postgresql.conf`:
+
+```
+wal_level = logical
+max_replication_slots = 10
+max_wal_senders = 10
+```
+
+Grant replication permissions to user:
+
+```
+ALTER ROLE pgcache_user REPLICATION;
+```
+
+### Install with Docker
+
+```bash
+docker run -d -p 5432:5432 -p 9090:9090 pgcache/pgcache \
+  --upstream postgres://user:password@your-db-host:5432/myapp
+```
+
+### Docker Compose Example
+
+```yaml
+services:
+  pgcache:
+    image: pgcache/pgcache
+    ports:
+      - "5432:5432"
+      - "9090:9090"
+    environment:
+      UPSTREAM_URL: postgres://user:password@db:5432/myapp
+      NUM_WORKERS: 4
+      PUBLICATION: pgcache_pub
+      SLOT: pgcache_slot
+```
+
+### Connect Your Application
+
+Update your connection string to point at PgCache:
+
+```
+# Before
+DATABASE_URL=postgres://user:password@db-host:5432/myapp
+
+# After
+DATABASE_URL=postgres://user:password@pgcache-host:5432/myapp
+```
+
+### Verify It Works
+
+```bash
+curl http://localhost:9090/metrics | grep pgcache_queries
+```
+
+Look for `pgcache_queries_cache_hit` and `pgcache_queries_cache_miss` counters.
+
+---
+
+## Architecture
+
+```
+┌──────────┐    queries     ┌──────────┐    uncacheable    ┌──────────┐
+│          │ ─────────────▶ │          │ ────────────────▶ │          │
+│   App    │                │ pgcache  │                   │PostgreSQL│
+│          │ ◀───────────── │          │ ◀──────────────── │ (origin) │
+└──────────┘   responses    └────┬──┬──┘    responses      └─────┬────┘
+                                 │  │                            │
+                           cache │  │    CDC stream               │
+                           read/ │  │   (logical replication)    │
+                           write │  └────────────────────────────┘
+                                 ▼
+                            ┌──────────┐
+                            │  Cache   │
+                            │   DB     │
+                            └──────────┘
+```
+
+1. Application sends queries to PgCache as if it were PostgreSQL
+2. PgCache analyzes each query to determine if it's cacheable
+3. Cacheable queries are served from cache database on cache hit
+4. Cache misses and non-cacheable queries are forwarded to origin
+5. CDC stream continuously processes changes from origin
+
+---
+
+## Configuration
+
+### Configuration Methods (Priority: CLI > TOML > Environment)
+
+| Method | Usage | Best For |
+|--------|-------|----------|
+| Environment variables | `UPSTREAM_URL=postgres://...` | Docker deployments (recommended) |
+| CLI arguments | Passed via Docker command | Overriding specific values |
+| TOML file | Mounted into container | Version-controlled config |
+
+### TOML Configuration Reference
+
+#### [origin] — Origin Database Connection
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `host` | string | yes | — | Origin database hostname |
+| `port` | integer | yes | — | Origin database port |
+| `user` | string | yes | — | Database user |
+| `password` | string | no | — | Database password |
+| `database` | string | yes | — | Database name |
+| `ssl_mode` | string | no | `disable` | TLS mode: `disable`, `require`, or `verify-full` |
+
+#### [replication] — Replication Connection (Optional)
+
+Override connection settings for CDC. Useful when app connects through PgBouncer but CDC needs direct PostgreSQL connection.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `host` | string | origin host | Replication host |
+| `port` | integer | origin port | Replication port |
+| `user` | string | origin user | Replication user |
+| `password` | string | origin password | Replication password |
+| `database` | string | origin database | Replication database |
+| `ssl_mode` | string | origin ssl_mode | TLS mode |
+
+#### [cdc] — Change Data Capture
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `publication_name` | string | yes | Name of publication PgCache creates on origin |
+| `slot_name` | string | yes | Name of replication slot PgCache creates on origin |
+
+#### [listen] — Proxy Listener
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `socket` | string | yes | Address and port to listen on (e.g., `0.0.0.0:5432`) |
+
+#### [metrics] — Prometheus Metrics
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `socket` | string | yes | Address and port for metrics HTTP endpoint |
+
+### Top-Level Settings
+
+#### General
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `num_workers` | integer | required | Number of worker threads |
+| `log_level` | string | — | Log level filter (e.g., `"info"`, `"debug"`, `"pgcache_lib::cache=debug,info"`) |
+
+#### Cache Behavior
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `cache_size` | integer | unlimited | Maximum cache size in bytes (enables eviction) |
+| `cache_policy` | string | `clock` | Eviction policy: `clock` (second-chance) or `fifo` |
+| `admission_threshold` | integer | `2` | Queries seen before caching (clock policy only) |
+| `allowed_tables` | array | all tables | Only cache queries referencing these tables |
+
+#### Pinned Queries
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `pinned_queries` | array | — | SQL queries to pin in cache at startup |
+| `pinned_tables` | array | — | Tables to pin (expanded to `SELECT * FROM {table}`) |
+
+#### TLS
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tls_cert` | string | — | Path to TLS certificate (PEM) |
+| `tls_key` | string | — | Path to TLS private key (PEM) |
+
+### Full Example Configuration
+
+```toml
+num_workers = 4
+cache_size = 1073741824  # 1 GB
+log_level = "info"
+
+[origin]
+host = "db.example.com"
+port = 5432
+user = "app_user"
+password = "secret"
+database = "myapp"
+ssl_mode = "require"
+
+[replication]
+host = "db-direct.example.com"
+port = 5432
+
+[cdc]
+publication_name = "pgcache_pub"
+slot_name = "pgcache_slot"
+
+[listen]
+socket = "0.0.0.0:6432"
+
+[metrics]
+socket = "0.0.0.0:9090"
+```
+
+### CLI Arguments Reference
+
+| Flag | Description |
+|------|-------------|
+| `-c`, `--config` | Path to TOML configuration file |
+| `--origin_host` | Origin database host |
+| `--origin_port` | Origin database port |
+| `--origin_user` | Origin database user |
+| `--origin_password` | Origin database password |
+| `--origin_database` | Origin database name |
+| `--origin_ssl_mode` | Origin TLS mode (`disable`, `require`, or `verify-full`) |
+| `--replication_host` | Replication host override |
+| `--replication_port` | Replication port override |
+| `--replication_user` | Replication user override |
+| `--replication_password` | Replication password override |
+| `--replication_database` | Replication database override |
+| `--replication_ssl_mode` | Replication TLS mode override |
+| `--cdc_publication_name` | Logical replication publication name |
+| `--cdc_slot_name` | Logical replication slot name |
+| `--listen_socket` | Listen address and port |
+| `--num_workers` | Number of worker threads |
+| `--cache_size` | Maximum cache size in bytes |
+| `--cache_policy` | Eviction policy (`clock` or `fifo`) |
+| `--admission_threshold` | Query admission threshold |
+| `--tls_cert` | TLS certificate file path |
+| `--tls_key` | TLS private key file path |
+| `--metrics_socket` | Prometheus metrics listen address |
+| `--log_level` | Log level filter |
+| `--allowed_tables` | Comma-separated list of tables to cache |
+| `--pinned_queries` | Semicolon-separated queries to pin in cache |
+| `--pinned_tables` | Comma-separated tables to pin in cache |
+
+### Docker Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `UPSTREAM_URL` | Origin database URL | — (required unless `CONFIG_FILE` set) |
+| `CONFIG_FILE` | Path to TOML config file | — |
+| `REPLICATION_URL` | Replication connection URL | upstream |
+| `REPLICATION_HOST` | Override replication host | — |
+| `REPLICATION_PORT` | Override replication port | — |
+| `REPLICATION_USER` | Override replication user | — |
+| `REPLICATION_DATABASE` | Override replication database | — |
+| `REPLICATION_PASSWORD` | Override replication password | — |
+| `REPLICATION_SSL_MODE` | Override replication TLS mode | — |
+| `LISTEN_PORT` | Proxy listen port | `5432` |
+| `METRICS_PORT` | Prometheus metrics port | `9090` |
+| `NUM_WORKERS` | Number of worker threads | `4` |
+| `PUBLICATION` | Publication name | `pgcache_pub` |
+| `SLOT` | Replication slot name | `pgcache_slot` |
+| `CDC_SUFFIX` | Suffix for publication/slot names | — |
+| `CACHE_SIZE` | Maximum cache size in bytes | — |
+| `CACHE_POLICY` | Eviction policy | `clock` |
+| `ADMISSION_THRESHOLD` | Queries seen before caching | `2` |
+| `ALLOWED_TABLES` | Comma-separated tables to cache | — |
+| `PINNED_QUERIES` | Semicolon-separated queries to pin | — |
+| `PINNED_TABLES` | Comma-separated tables to pin | — |
+| `LOG_LEVEL` | Log level filter | — |
+| `PGCACHE_TLS_CERT` | Base64-encoded TLS certificate | — |
+| `PGCACHE_TLS_KEY` | Base64-encoded TLS private key | — |
+
+---
+
+## What Gets Cached
+
+### Cacheable Queries
+
+- Single-table SELECT statements
+- INNER JOIN, LEFT JOIN, RIGHT JOIN with equality join conditions
+- WHERE clauses: `=`, `!=`, `<`, `<=`, `>`, `>=`
+- Boolean operators: AND, OR
+- IN and NOT IN expressions
+- IS NULL and IS NOT NULL checks
+- NOT expressions
+- GROUP BY and HAVING clauses
+- ORDER BY clauses
+- Aggregate functions: COUNT, SUM, AVG, etc.
+- Window functions: ROW_NUMBER, RANK, etc.
+- CASE expressions
+- Arithmetic expressions
+- Uncorrelated subqueries in SELECT, FROM, WHERE
+- Correlated subqueries (EXISTS, NOT EXISTS, IN, NOT IN, scalar) - decorrelated into equivalent JOINs
+- CTEs including MATERIALIZED/NOT MATERIALIZED
+- Set operations: UNION, UNION ALL, INTERSECT, EXCEPT
+- Functions in SELECT list
+- Immutable functions in WHERE/JOIN: lower(), upper(), abs(), etc.
+- LIMIT/OFFSET (queries differing only in LIMIT share cache entry)
+- Pattern matching: LIKE, NOT LIKE, ILIKE, NOT ILIKE
+- Range expressions: BETWEEN, NOT BETWEEN, BETWEEN SYMMETRIC
+- Array comparisons: `= ANY(...)`, `op ALL(...)`
+- Mixed wildcards and columns: `SELECT *, id, name FROM ...`
+- EXISTS/NOT EXISTS subqueries
+- IS [NOT] TRUE/FALSE/UNKNOWN
+- Extended query protocol (parameterized queries)
+
+### NOT Cached (Forwarded to Origin)
+
+- Non-SELECT statements: INSERT, UPDATE, DELETE, DDL
+- FULL JOIN and CROSS JOIN
+- LATERAL subqueries
+- Non-equality correlated predicates (`<`, `>`, OR-connected)
+- RECURSIVE CTEs
+- Non-immutable functions outside SELECT list
+- Locking clauses: FOR UPDATE, FOR SHARE, etc.
+- Views
+
+---
+
+## Cache Maintenance
+
+### CDC (Change Data Capture)
+
+1. PgCache creates publication and replication slot on origin
+2. Publication is dynamically managed (only tables with cached queries)
+3. Changes (INSERT, UPDATE, DELETE, TRUNCATE) streamed via logical replication
+4. Affected cache entries updated directly or invalidated
+
+### Table Allowlist
+
+Restrict caching to specific tables:
+
+```toml
+allowed_tables = ["users", "orders", "products"]
+```
+
+### Pinned Queries
+
+Pre-populate and protect queries from eviction:
+
+```toml
+pinned_queries = [
+    "SELECT * FROM settings",
+    "SELECT * FROM categories",
+]
+pinned_tables = ["settings", "categories"]
+```
+
+Single-table pinned queries are updated in place via CDC, never invalidated.
+
+### Cache Admission
+
+Default CLOCK policy requires query seen `admission_threshold` times (default 2) before caching. Prevents one-off queries consuming cache space. Fast-readmission after CDC invalidation.
+
+### Predicate Subsumption
+
+When query result set is covered by existing cached query. Example: if `SELECT * FROM users` is cached, `SELECT * FROM users WHERE id = 1` can be served from cached superset.
+
+### Cache Size Management
+
+When `cache_size` is set, CLOCK (second-chance) eviction policy applies. FIFO also available.
+
+---
+
+## Consistency Guarantees
+
+PgCache provides **eventual consistency**:
+
+- Changes streamed via CDC with minimal delay
+- Replication lag exposed as metrics: `pgcache.cdc.lag_seconds`, `pgcache.cdc.lag_bytes`
+- Cache fully reset on every PgCache startup
+- Uncacheable queries always go directly to origin
+
+Typical lag between origin write and cache invalidation: sub-second.
+
+---
+
+## Monitoring
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /metrics` | Prometheus metrics in text exposition format |
+| `GET /healthz` | Liveness check (always 200 if process running) |
+| `GET /readyz` | Readiness check (200 when cache running, 503 otherwise) |
+| `GET /status` | JSON with cache, CDC, and per-query status |
+
+### Prometheus Scrape Config
+
+```yaml
+scrape_configs:
+  - job_name: pgcache
+    static_configs:
+      - targets: ['pgcache-host:9090']
+```
+
+### Available Metrics
+
+#### Query Counters
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pgcache.queries.total` | counter | Total queries received |
+| `pgcache.queries.cacheable` | counter | Queries identified as cacheable |
+| `pgcache.queries.uncacheable` | counter | Queries forwarded to origin |
+| `pgcache.queries.unsupported` | counter | Unsupported statement types |
+| `pgcache.queries.invalid` | counter | Queries that failed to parse |
+| `pgcache.queries.cache_hit` | counter | Queries served from cache |
+| `pgcache.queries.cache_miss` | counter | Cacheable queries that missed |
+| `pgcache.queries.cache_error` | counter | Cache lookup errors |
+| `pgcache.queries.allowlist_skipped` | counter | Queries skipped (tables not in allowlist) |
+
+#### Latency Histograms (seconds, p50/p95/p99)
+
+| Metric | Description |
+|--------|-------------|
+| `pgcache.query.latency_seconds` | End-to-end query latency |
+| `pgcache.cache.lookup_latency_seconds` | Cache lookup time |
+| `pgcache.origin.latency_seconds` | Origin database query time |
+| `pgcache.query.registration_latency_seconds` | Time to register new query |
+| `pgcache.query.stage.parse_seconds` | SQL parsing |
+| `pgcache.query.stage.dispatch_seconds` | Dispatching to cache channel |
+| `pgcache.query.stage.lookup_seconds` | Cache lookup |
+| `pgcache.query.stage.queue_wait_seconds` | Time waiting in worker channel queue |
+| `pgcache.query.stage.conn_wait_seconds` | Time waiting for cache DB connection |
+| `pgcache.query.stage.spawn_wait_seconds` | Time waiting for worker task spawn |
+| `pgcache.query.stage.worker_exec_seconds` | Cache worker execution |
+| `pgcache.query.stage.response_write_seconds` | Writing response to client |
+| `pgcache.query.stage.total_seconds` | Total pipeline time |
+
+#### Connection Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pgcache.connections.total` | counter | Total connections accepted |
+| `pgcache.connections.active` | gauge | Currently active connections |
+| `pgcache.connections.errors` | counter | Connection errors |
+
+#### CDC / Replication Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pgcache.cdc.events_processed` | counter | Total CDC events processed |
+| `pgcache.cdc.inserts` | counter | Insert events received |
+| `pgcache.cdc.updates` | counter | Update events received |
+| `pgcache.cdc.deletes` | counter | Delete events received |
+| `pgcache.cdc.lag_bytes` | gauge | WAL replication lag in bytes |
+| `pgcache.cdc.lag_seconds` | gauge | Replication lag in seconds |
+
+#### Cache State Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pgcache.cache.invalidations` | counter | Cache entries invalidated by CDC |
+| `pgcache.cache.evictions` | counter | Cache entries evicted due to size limits |
+| `pgcache.cache.queries_registered` | gauge | Number of queries currently cached |
+| `pgcache.cache.queries_loading` | gauge | Queries currently being loaded |
+| `pgcache.cache.queries_pending` | gauge | Queries seen but not yet admitted |
+| `pgcache.cache.queries_invalidated` | gauge | Invalidated entries retained for fast readmission |
+| `pgcache.cache.freshness_hits` | counter | Cached queries confirmed fresh by CDC |
+| `pgcache.cache.readmissions` | counter | Queries fast-readmitted after CDC invalidation |
+| `pgcache.cache.subsumptions` | counter | Queries served via predicate subsumption |
+| `pgcache.cache.subsumption_latency_seconds` | histogram | Time detecting predicate subsumption |
+| `pgcache.cache.size_bytes` | gauge | Current cache size in bytes |
+| `pgcache.cache.size_limit_bytes` | gauge | Configured cache size limit |
+| `pgcache.cache.tables_tracked` | gauge | Number of tables tracked for invalidation |
+
+#### Writer Queue Depths
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pgcache.cache.writer_query_queue` | gauge | Pending query registration messages |
+| `pgcache.cache.writer_cdc_queue` | gauge | Pending CDC messages |
+| `pgcache.cache.writer_internal_queue` | gauge | Internal message queue depth |
+
+#### CDC Handler Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pgcache.cache.handle_inserts` | counter | Insert operations processed |
+| `pgcache.cache.handle_updates` | counter | Update operations processed |
+| `pgcache.cache.handle_deletes` | counter | Delete operations processed |
+| `pgcache.cache.handle_insert_seconds` | histogram | Insert handler duration |
+| `pgcache.cache.handle_update_seconds` | histogram | Update handler duration |
+| `pgcache.cache.handle_delete_seconds` | histogram | Delete handler duration |
+
+#### Protocol Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pgcache.protocol.simple_queries` | counter | Simple query protocol |
+| `pgcache.protocol.extended_queries` | counter | Extended query protocol |
+| `pgcache.protocol.prepared_statements` | counter | Prepared statements created |
+
+### Key PromQL Queries
+
+Cache hit ratio:
+```
+rate(pgcache_queries_cache_hit_total[5m])
+/
+(rate(pgcache_queries_cache_hit_total[5m]) + rate(pgcache_queries_cache_miss_total[5m]))
+```
+
+Query latency p95:
+```
+pgcache_query_latency_seconds{quantile="0.95"}
+```
+
+CDC replication lag:
+```
+pgcache_cdc_lag_seconds
+```
+
+Cache size utilization:
+```
+pgcache_cache_size_bytes / pgcache_cache_size_limit_bytes
+```
+
+### Status Endpoint Response
+
+```json
+{
+  "cache": {
+    "size_bytes": 10485760,
+    "size_limit_bytes": 1073741824,
+    "generation": 42,
+    "tables_tracked": 5,
+    "policy": "clock"
+  },
+  "cdc": {
+    "tables": ["public.users", "public.orders"],
+    "last_received_lsn": 12345678,
+    "last_flushed_lsn": 12345600,
+    "lag_bytes": 78
+  },
+  "queries": [
+    {
+      "fingerprint": 9876543210,
+      "sql_preview": "SELECT * FROM users WHERE ...",
+      "tables": ["public.users"],
+      "state": "cached",
+      "cached_bytes": 2048,
+      "max_limit": null,
+      "pinned": false
+    }
+  ]
+}
+```
+
+### Health Checks
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 9090
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 9090
+```
+
+---
+
+## AWS Marketplace
+
+Pre-built AMI on Amazon Linux 2023 (ARM64/Graviton) with embedded PostgreSQL 18.
+
+### Quick Start
+
+1. Store database URL in SSM:
+```bash
+aws ssm put-parameter --name "/pgcache/prod/upstream-url" \
+  --type SecureString \
+  --value "postgres://user:password@host:5432/dbname?sslmode=require"
+```
+
+2. Create IAM role with SSM read access
+
+3. Create security group (ports 5432, 9090)
+
+4. Launch instance with bootstrap:
+```bash
+/opt/pgcache/bootstrap.sh --ssm-prefix /pgcache/prod
+```
+
+### Bootstrap Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ssm-prefix` | (required) | SSM Parameter Store path prefix |
+| `--workers` | half vCPUs | Proxy worker threads |
+| `--cache-size` | unlimited | Max cache size in bytes |
+| `--cache-policy` | `clock` | Eviction policy |
+| `--admission-threshold` | `2` | Queries seen before caching |
+| `--allowed-tables` | all | Comma-separated tables |
+| `--pinned-tables` | none | Comma-separated tables to pin |
+| `--pinned-queries` | none | Semicolon-separated queries |
+| `--cdc-suffix` | EC2 instance ID | Suffix for publication/slot names |
+
+### Recommended Instance Types (m6g Graviton)
+
+| Type | vCPUs | Memory | Workers | Shared Buffers |
+|------|-------|--------|---------|---------------|
+| m6g.medium | 1 | 4 GB | 1 | 1 GB |
+| m6g.large | 2 | 8 GB | 1 | 2 GB |
+| m6g.xlarge | 4 | 16 GB | 2 | 4 GB |
+| m6g.2xlarge | 8 | 32 GB | 4 | 8 GB |
+| m6g.4xlarge | 16 | 64 GB | 8 | 8 GB (capped) |
+
+### File Locations
+
+| Path | Description |
+|------|-------------|
+| `/usr/local/bin/pgcache` | PgCache binary |
+| `/etc/pgcache/config.toml` | Configuration file |
+| `/etc/pgcache/pgcache.env` | Environment variables for systemd |
+| `/etc/pgcache/tls/` | TLS certificates |
+| `/opt/pgcache/bootstrap.sh` | Bootstrap script |
+| `/var/lib/pgsql/18/data/` | PostgreSQL data directory |
+| `/var/log/postgresql/cache.log` | PostgreSQL log |
+
+### Managing Instance
+
+```bash
+sudo systemctl status pgcache          # Service status
+sudo journalctl -u pgcache -f          # Live logs
+sudo tail -f /var/log/postgresql/cache.log  # PostgreSQL logs
+sudo vi /etc/pgcache/config.toml       # Modify config
+sudo systemctl restart pgcache          # Restart PgCache
+```
+
+---
+
+## Compatibility
+
+### PostgreSQL Version Support
+
+| Version | Status |
+|---------|--------|
+| 18 | Supported (primary target) |
+| 17 | Supported (search_path changes not supported) |
+| 16 | Supported (search_path changes not supported) |
+| 15 and below | Not supported |
+
+Origin must have `wal_level = logical` enabled.
+
+### Client Library Compatibility
+
+Any PostgreSQL client library works:
+
+| Language | Libraries |
+|----------|-----------|
+| Python | psycopg2, psycopg3, asyncpg, SQLAlchemy |
+| JavaScript/TypeScript | node-postgres, Prisma, Drizzle, Knex |
+| Java | JDBC, HikariCP, jOOQ |
+| Go | pgx, database/sql with pq driver |
+| Rust | tokio-postgres, sqlx, diesel |
+| Ruby | pg gem, ActiveRecord |
+| .NET | Npgsql, Entity Framework |
+
+### TLS Support
+
+| Connection | Configuration |
+|------------|---------------|
+| Client to PgCache | `tls_cert` and `tls_key` (PEM) |
+| PgCache to origin | `ssl_mode = "require"` or `"verify-full"` |
+| PgCache to replication | `ssl_mode = "require"` or `"verify-full"` |
+
+Note: Set `channel_binding=disable` in client connection string.
+
+### Connection Pooler Compatibility
+
+Works with PgBouncer:
+- App → PgCache (caching proxy)
+- PgCache → PgBouncer (for regular queries via `[origin]`)
+- PgCache → PostgreSQL directly (for CDC via `[replication]`)
+
+### Known Limitations
+
+- Cache reset on startup (ensures clean state)
+- Single-node only (no distributed cache)
+- COPY protocol not proxied
+- LISTEN/NOTIFY not proxied
+- WAL can accumulate if PgCache down extended period
+
+---
+
+## Changelog
+
+### 0.4.5 — 2026-03-16
+
+**Features:**
+- Admin HTTP endpoints: `/healthz`, `/readyz`, `/status`
+- Database mismatch detection (logs warning, proxies to origin for mismatched connections)
+
+**Performance:**
+- Pool sizing from num_workers (cache connection pool and population worker pool scale automatically)
+
+**Bug Fixes:**
+- SELECT \* column order (fixed non-deterministic order from cache)
+
+**Observability:**
+- New per-stage timing metrics: `pgcache.query.stage.queue_wait_seconds`, `pgcache.query.stage.conn_wait_seconds`, `pgcache.query.stage.spawn_wait_seconds`
+
+**Internals:**
+- Replaced hand-rolled HTTP server with hyper
+- Refactored `TableMetadata` column storage from `BiHashMap` to `ColumnStore`
+- Refactored test utilities into separate submodules
+
+### 0.4.4 — 2026-03-07
+
+**Reliability:**
+- Graceful shutdown via SIGINT (cancellation tokens, publication/slot removed)
+
+**Breaking Changes:**
+- CLI argument `--cache_tables` renamed to `--allowed_tables`
+
+### 0.4.3 — 2026-03-06
+
+**Features:**
+- Table allowlist via `allowed_tables`
+- Pinned queries via `pinned_queries`
+- Pinned tables via `pinned_tables`
+- Predicate subsumption
+
+### 0.4.2 — 2026-02-28
+
+**Bug Fixes:**
+- Fixed TLS reads losing unconsumed ciphertext across poll calls
+- Fixed TLS partial writes dropping data
+
+**Observability:**
+- New `pgcache.cache.freshness_hits` metric
+
+---
+
+## Docker Examples
+
+Basic:
+```bash
+docker run -d -p 5432:5432 pgcache/pgcache \
+  --upstream postgres://user@db:5432/myapp
+```
+
+With replication override (origin behind PgBouncer):
+```bash
+docker run -d -p 5432:5432 pgcache/pgcache \
+  --upstream postgres://user@pgbouncer:6432/myapp \
+  --replication-host db-direct.example.com \
+  --replication-port 5432
+```
+
+With environment variables:
+```bash
+docker run -d -p 5432:5432 \
+  -e UPSTREAM_URL=postgres://user@db:5432/myapp \
+  -e NUM_WORKERS=8 \
+  -e REPLICATION_HOST=db-direct.example.com \
+  pgcache/pgcache
+```
+
+With TOML config:
+```bash
+docker run -d -p 5432:5432 -p 9090:9090 \
+  -v ./pgcache.toml:/etc/pgcache/config.toml:ro \
+  -e CONFIG_FILE=/etc/pgcache/config.toml \
+  pgcache/pgcache
+```
+
+With table allowlist and pinned tables:
+```bash
+docker run -d -p 5432:5432 \
+  -e UPSTREAM_URL=postgres://user@db:5432/myapp \
+  -e ALLOWED_TABLES=users,orders,products \
+  -e PINNED_TABLES=users,products \
+  pgcache/pgcache
+```
+
+With pinned queries:
+```bash
+docker run -d -p 5432:5432 pgcache/pgcache \
+  --upstream postgres://user@db:5432/myapp \
+  --pinned-queries "SELECT * FROM config;SELECT * FROM lookup"
+```
