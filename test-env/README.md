@@ -7,7 +7,7 @@ A complete, self-contained test environment for PgCache with sample e-commerce S
 | Service | Port | Description |
 |---------|------|-------------|
 | PostgreSQL Origin | 5433 | Source database with 1M+ rows |
-| PgCache | 5432 | Caching proxy |
+| PgCache | 6432 | Caching proxy |
 | Prometheus | 9091 | Metrics collection |
 | Grafana | 3000 | Visualization dashboard |
 
@@ -28,17 +28,26 @@ docker compose logs -f generate_data
 curl http://localhost:9090/healthz
 ```
 
+## Important: Port 5432 Conflict
+
+PgCache uses port **6432** (not 5432) to avoid conflicts with local PostgreSQL installations. If you have PostgreSQL running locally on port 5432, stop it first:
+
+```bash
+brew services stop postgresql@17  # macOS
+sudo systemctl stop postgresql     # Linux
+```
+
 ## Services
 
 ### PgCache Proxy
-- **Port**: 5432 (mapped to localhost)
+- **Port**: 6432 (mapped to localhost)
 - **Metrics**: http://localhost:9090/metrics
 - **Health**: http://localhost:9090/healthz
 - **Status**: http://localhost:9090/status
 
 Connect your app:
 ```bash
-psql postgres://store_user:store_secret@localhost:5432/store
+psql postgres://store_user:store_secret@localhost:6432/store
 ```
 
 ### Grafana Dashboard
@@ -119,7 +128,7 @@ Update `pgcache-playground/.env`:
 
 ```env
 POSTGRES_URL=localhost:5433
-PGCACHE_URL=localhost:5432
+PGCACHE_URL=localhost:6432
 DB_USER=store_user
 DB_PASSWORD=store_secret
 DB_NAME=store
