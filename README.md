@@ -17,6 +17,7 @@ pgcache-garage/
 ├── README.md              # This file
 ├── llm.txt                # Full PgCache documentation for LLM context
 ├── pgcache.skill.md       # PgCache skill definition for AI agents
+├── pgcache-playground/     # Web-based SQL editor and benchmarking tool
 └── experiments/           # (future) Experimental configurations and tests
 ```
 
@@ -50,6 +51,22 @@ PgCache skill definition following the standard skill format. This is a condense
 - Troubleshooting guide
 
 **Use case**: Load as a skill when working with PgCache-related tasks.
+
+### pgcache-playground
+
+Web-based SQL editor and benchmarking tool to compare direct PostgreSQL queries against PgCache. Built with Next.js.
+
+Features:
+- Dual connection to PostgreSQL and PgCache simultaneously
+- Schema explorer for browsing tables and columns
+- SQL editor with parameterized query support
+- Benchmark both databases or select one specifically
+- Real-time performance visualization with charts
+- Statistical summary (Mean, Median, Min, Max, StdDev)
+
+**Location**: [pgcache-playground/](pgcache-playground/)
+
+**Use case**: Test and benchmark PgCache performance against your PostgreSQL origin.
 
 ## Quick Start
 
