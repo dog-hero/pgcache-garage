@@ -14,11 +14,12 @@ This repository is organized into experiments and tooling:
 
 ```
 pgcache-garage/
-├── README.md              # This file
-├── llm.txt                # Full PgCache documentation for LLM context
-├── pgcache.skill.md       # PgCache skill definition for AI agents
-├── pgcache-playground/     # Web-based SQL editor and benchmarking tool
-└── experiments/           # (future) Experimental configurations and tests
+├── README.md                   # This file
+├── llm.txt                     # Full PgCache documentation for LLM context
+├── pgcache.skill.md            # PgCache skill definition for AI agents
+├── pgcache-playground/         # Web-based SQL editor and benchmarking tool
+├── terraform-modules-pgcache/  # Reusable Terraform modules for AWS
+└── experiments/                # (future) Experimental configurations and tests
 ```
 
 ## Projects
@@ -67,6 +68,31 @@ Features:
 **Location**: [pgcache-playground/](pgcache-playground/)
 
 **Use case**: Test and benchmark PgCache performance against your PostgreSQL origin.
+
+### terraform-modules-pgcache
+
+Reusable Terraform modules for provisioning PgCache on AWS. Includes IAM, security group, SSM parameters, and EC2 instance modules.
+
+Modules:
+- **iam** — IAM role with SSM Parameter Store read access
+- **security-group** — Security group for ports 5432, 9090
+- **ssm-parameters** — SSM SecureString for upstream URL and TLS certs
+- **ec2-instance** — EC2 instance with PgCache bootstrap
+
+Usage:
+```hcl
+module "pgcache" {
+  source  = "github.com/tempest98/terraform-modules-pgcache//modules/ec2-instance?ref=v0.1.0"
+  environment  = "prod"
+  upstream_url = "postgres://user:pass@host:5432/db?sslmode=require"
+  vpc_id       = "vpc-12345"
+  subnet_id    = "subnet-12345"
+}
+```
+
+**Location**: [terraform-modules-pgcache/](terraform-modules-pgcache/)
+
+**Use case**: Infrastructure as Code for deploying PgCache on AWS.
 
 ## Quick Start
 
