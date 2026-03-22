@@ -18,6 +18,7 @@ pgcache-garage/
 ├── llm.txt                     # Full PgCache documentation for LLM context
 ├── pgcache.skill.md            # PgCache skill definition for AI agents
 ├── pgcache-playground/         # Web-based SQL editor and benchmarking tool
+├── test-env/                   # Complete test environment with Docker Compose
 ├── terraform-ami/              # Direct Terraform resources (monolithic)
 ├── terraform-modules-pgcache/  # Reusable Terraform modules for AWS
 └── experiments/                # (future) Experimental configurations and tests
@@ -69,6 +70,32 @@ Features:
 **Location**: [pgcache-playground/](pgcache-playground/)
 
 **Use case**: Test and benchmark PgCache performance against your PostgreSQL origin.
+
+### test-env
+
+Complete test environment with Docker Compose. Includes PostgreSQL 16 origin with 1M+ rows of e-commerce SaaS data, PgCache proxy, Prometheus, and Grafana dashboard.
+
+Stack:
+- **PostgreSQL 16** — Origin database with logical replication
+- **PgCache** (`pgcache/pgcache:0.4.5-amd64`) — Caching proxy
+- **Prometheus** — Metrics collection
+- **Grafana** — Auto-provisioned dashboard
+
+Quick start:
+```bash
+cd test-env
+docker compose up -d
+```
+
+Features:
+- E-commerce SaaS schema (tenants, products, orders, customers, subscriptions)
+- ~1 million rows of sample data
+- Pre-built Grafana dashboard for cache monitoring
+- Prometheus scrape config for PgCache metrics
+
+**Location**: [test-env/](test-env/)
+
+**Use case**: Fully functional local PgCache environment for testing and monitoring.
 
 ### terraform-modules-pgcache
 

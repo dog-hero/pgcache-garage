@@ -1,0 +1,17 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Docker
+*.log
+prometheus_data/
+grafana_data/
+postgres_origin_data/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store

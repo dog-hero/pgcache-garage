@@ -1,0 +1,114 @@
+version: "3.9"
+
+networks:
+  pgcache-network:
+    driver: bridge
+
+volumes:
+  postgres_origin_data:
+  prometheus_data:
+  grafana_data:
+
+services:
+  postgres_origin:
+    image: postgres:16-alpine
+    container_name: pgcache_origin
+    environment:
+      POSTGRES_DB: store
+      POSTGRES_USER: store_user
+      POSTGRES_PASSWORD: store_secret
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_origin_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./postgres/seed.sql:/docker-entrypoint-initdb.d/seed.sql
+    command: >
+      postgres
+      -c wal_level=logical
+      -c max_replication_slots=10
+      -c max_wal_senders=10
+      -c shared_preload_libraries=pg_stat_statements
+    networks:
+      - pgcache-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U store_user -d store"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgcache:
+    image: pgcache/pgcache:0.4.5-amd64
+    container_name: pgcache_proxy
+    ports:
+      - "5432:5432"
+      - "9090:9090"
+    environment:
+      UPSTREAM_URL: postgres://store_user:store_secret@postgres_origin:5432/store
+      NUM_WORKERS: 4
+      PUBLICATION: store_pub
+      SLOT: store_slot
+      CACHE_SIZE: 1073741824
+      CACHE_POLICY: clock
+      ADMISSION_THRESHOLD: 2
+      LOG_LEVEL: info
+    depends_on:
+      postgres_origin:
+        condition: service_healthy
+    networks:
+      - pgcache-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9090/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pgcache_prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    networks:
+      - pgcache-network
+    depends_on:
+      - pgcache
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pgcache_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - pgcache-network
+    depends_on:
+      - prometheus
+
+  generate_data:
+    image: postgres:16-alpine
+    container_name: pgcache_data_generator
+    environment:
+      PGPASSWORD: store_secret
+    volumes:
+      - ./postgres/seed_large.sql:/seed_large.sql
+    command: ["sh", "-c", "sleep 5 && psql -h postgres_origin -U store_user -d store -f /seed_large.sql"]
+    networks:
+      - pgcache-network
+    depends_on:
+      postgres_origin:
+        condition: service_healthy
+    restart: "no"
