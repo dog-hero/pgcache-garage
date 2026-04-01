@@ -30,7 +30,7 @@ resource "aws_iam_role_policy" "pgcache_ssm_read" {
           "ssm:GetParameter",
           "ssm:GetParameters",
         ]
-        Resource = "arn:aws:ssm:*:*:parameter/${var.ssm_prefix}/*"
+        Resource = "arn:aws:ssm:*:*:parameter/${trimprefix(var.ssm_prefix, "/")}/*"
       }
     ]
   })
